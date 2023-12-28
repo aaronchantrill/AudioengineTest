@@ -1,9 +1,20 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import abc
+import collections
+import contextlib
+import itertools
+import json
 import math
+import os
 import sys
+import tempfile
+import threading
 import unittest
+import wave
 from blessings import Terminal
+from datetime import datetime
+from vosk import Model, KaldiRecognizer
 
 # 'audioop' is deprecated and slated for removal in Python 3.13
 try:
@@ -20,6 +31,10 @@ try:
     import alsaaudio
 except ImportError:
     alsaaudio = None
+
+
+VOSK_MODEL = os.path.expanduser("~/VOSK/vosk-model-en-us-0.22-lgraph")
+
 
 def devices(library):
     if library == 'pyaudio':
@@ -88,6 +103,22 @@ def mic_volume(*args, **kwargs):
     println("".join(feedback), displaywidth)
 
 
+# https://stackoverflow.com/questions/10003143/how-to-slice-a-deque
+class sliceable_deque(collections.deque):
+    def __getitem__(self, index):
+        try:
+            return collections.deque.__getitem__(self, index)
+        except TypeError:
+            return type(self)(
+                itertools.islice(
+                    self,
+                    index.start,
+                    index.stop,
+                    index.step
+                )
+            )
+
+
 class AudioProcessor:
     def __init__(self, *args, **kwargs):
         self.input_device = kwargs['input_device']
@@ -97,7 +128,6 @@ class AudioProcessor:
         self.periodsize = kwargs['periodsize']
         self.sample_bits = kwargs['sample_bits']
         self.VAD = SNRVAD()
-
 
     @abc.abstractmethod
     def run(self):
@@ -123,6 +153,8 @@ class PyAudioProcessor(AudioProcessor):
             periodsize=periodsize
         )
         self.input_device = int(self.input_device)
+
+    def open_stream(self, *args, **kwargs):
         self.stream = pyaudio.PyAudio().open(
             format=self.sample_format,
             channels=self.channels,
@@ -132,21 +164,12 @@ class PyAudioProcessor(AudioProcessor):
             frames_per_buffer=self.periodsize
         )
 
-    def run(self):
-        try:
-            recording = False
-            while True:
-                input_data = self.stream.read(self.periodsize)
-                recording = self.VAD._voice_detected(
-                    input_data,
-                    input_bits=self.sample_bits,
-                    recording=recording
-                )
-        except KeyboardInterrupt:
-            pass
-        finally:
-            # Close the stream
-            self.stream.close()
+    def record(self, *args, **kwargs):
+        return self.stream.read(self.periodsize)
+
+    def close_stream(self, *args, **kwargs):
+        # Close the stream
+        self.stream.close()
 
 
 class AlsaAudioProcessor(AudioProcessor):
@@ -167,6 +190,8 @@ class AlsaAudioProcessor(AudioProcessor):
             sample_bits=sample_bits,
             periodsize=periodsize
         )
+
+    def open_stream(self, *args, **kwargs):
         self.stream = alsaaudio.PCM(
             alsaaudio.PCM_CAPTURE,
             alsaaudio.PCM_NORMAL,
@@ -177,21 +202,12 @@ class AlsaAudioProcessor(AudioProcessor):
             periodsize=self.periodsize
         )
 
-    def run(self):
-        try:
-            recording = False
-            while True:
-                input_data = self.stream.read()[1]
-                recording = self.VAD._voice_detected(
-                    input_data,
-                    input_bits=self.sample_bits,
-                    recording=recording
-                )
-        except KeyboardInterrupt:
-            pass
-        finally:
-            # Close the stream
-            self.stream.close()
+    def record(self, *args, **kwargs):
+        return self.stream.read()[1]
+
+    def close_stream(self, *args, **kwargs):
+        # Close the stream
+        self.stream.close()
 
 
 # This is a really simple voice activity detector
@@ -207,7 +223,7 @@ class AlsaAudioProcessor(AudioProcessor):
 # recording stops. If the total length of the recording is
 # over twice the length of timeout, then the recorded audio
 # is returned for processing.
-class SNRVAD():
+class SNRVAD:
     _maxsnr = None
     _minsnr = None
     _visualizations = []
@@ -295,38 +311,170 @@ class SNRVAD():
         return response
 
 
-def main():
-    if pyaudio is None and alsaaudio is None:
-        print("Error: Both pyaudio and pyalsaaudio libraries are not installed.")
-        sys.exit(1)
+class Main:
+    def __init__(self):
+        self.recordings_queue = collections.deque([], maxlen=10)
+        self.model = Model(VOSK_MODEL, 16000)
+        self.rec = KaldiRecognizer(self.model, 16000)
+        self.input_channels = 1
+        self.input_bits = 16
+        self.input_samplerate = 16000
+        try:
+            self.displaywidth = Terminal().width
+        except TypeError:
+            self.displaywidth = 20
 
-    available_libraries = []
-    if pyaudio:
-        available_libraries.append('pyaudio')
-    if alsaaudio:
-        available_libraries.append('alsaaudio')
+    @contextlib.contextmanager
+    def _write_frames_to_file(self, frames):
+        with tempfile.NamedTemporaryFile(
+            mode='w+b',
+            suffix=".wav",
+            prefix=datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        ) as f:
+            wav_fp = wave.open(f, 'wb')
+            wav_fp.setnchannels(self.input_channels)
+            wav_fp.setsampwidth(int(self.input_bits // 8))
+            wav_fp.setframerate(self.input_samplerate)
+            fragment = b''.join(frames)
+            wav_fp.writeframes(fragment)
+            wav_fp.close()
+            f.seek(0)
+            yield f
 
-    print("Available audio libraries:", available_libraries)
+    def stt(self):
+        while True:
+            try:
+                audio = self.recordings_queue.pop()
+                # println(f"Popped {len(audio)} frames from queue", scroll=True)
+                # println(f"type: {type(audio)}", scroll=True)
+                with self._write_frames_to_file(audio) as f:
+                    f.seek(44)
+                    data = f.read()
+                self.rec.AcceptWaveform(data)
+                res = json.loads(self.rec.FinalResult())
+                transcription = res['text'].strip()
+                if len(transcription) > 0:
+                    println(f"<< {transcription} {len(self.recordings_queue)}", self.displaywidth, scroll=True)
+                if any(map(lambda v: v in transcription, ["shut down", "shutdown", "turn off", "quit"])):
+                    self.say("okay, quitting")
+                    self.Continue = False
+                if transcription.startswith("say "):
+                    # start a speak thread
+                    self.say("here is what you said to say")
+                    self.say(transcription[4:])
+            except IndexError:
+                break
 
-    library_choice = input("Choose an audio library ({}): ".format("/".join(available_libraries)))
+    def main(self):
+        if pyaudio is None and alsaaudio is None:
+            print("Error: Both pyaudio and pyalsaaudio libraries are not installed.")
+            sys.exit(1)
 
-    if library_choice not in available_libraries:
-        print("Invalid choice. Exiting.")
-        sys.exit(1)
+        available_libraries = []
+        if pyaudio:
+            available_libraries.append('pyaudio')
+        if alsaaudio:
+            available_libraries.append('alsaaudio')
 
-    devices(library_choice)
+        print("Available audio libraries:", available_libraries)
 
-    input_device = input("Enter input device index or 'default': ")
+        library_choice = input("Choose an audio library ({}): ".format("/".join(available_libraries)))
 
-    print("Streaming... Press Ctrl+C to stop.")
+        if library_choice not in available_libraries:
+            print("Invalid choice. Exiting.")
+            sys.exit(1)
 
-    audio_processor = None
-    if(library_choice == 'pyaudio'):
-        audio_processor = PyAudioProcessor(input_device=input_device)
-    elif(library_choice == 'alsaaudio'):
-        audio_processor = AlsaAudioProcessor(input_device=input_device)
-    if(audio_processor):
-        audio_processor.run()
+        devices(library_choice)
+
+        input_device = input("Enter input device index or 'default': ")
+
+        print("Streaming... Press Ctrl+C to stop.")
+
+        audio_processor = None
+        if(library_choice == 'pyaudio'):
+            audio_processor = PyAudioProcessor(
+                input_device=input_device,
+                channels=self.input_channels,
+                sample_bits=self.input_bits,
+                sample_rate=self.input_samplerate
+            )
+        elif(library_choice == 'alsaaudio'):
+            audio_processor = AlsaAudioProcessor(
+                input_device=input_device,
+                channels=self.input_channels,
+                sample_bits=self.input_bits,
+                sample_rate=self.input_samplerate
+            )
+
+        VAD = SNRVAD()
+        frames = sliceable_deque([], 30)
+        timeout=1
+        minimum_capture=0.5
+        _timeout_frames = 10
+        stt_thread = None
+        # periodlength is the length of a period in seconds
+        period_length = 0.03
+        _minimum_capture = round((timeout + minimum_capture) / period_length)
+        last_voice_frame = 0
+        recording = False
+        recording_frames = []
+        audio_processor.open_stream()
+        try:
+            while True:
+                input_data = audio_processor.record()
+                voice_detected = VAD._voice_detected(
+                    input_data,
+                    input_bits=self.input_bits,
+                    recording=recording
+                )
+                frames.append(input_data)
+                if not recording:
+                    if(voice_detected):
+                        # Voice activity detected, start recording and use
+                        # the last 10 frames to start
+                        # println(
+                        #     "Started recording",
+                        #     scroll=True
+                        # )
+                        recording = True
+                        # Include the previous 10 frames in the recording.
+                        # print(f"slice - max({len(frames)} - {_timeout_frames}, 0) = {max(len(frames)-_timeout_frames, 0)}")
+                        recording_frames = frames[max(len(frames)-_timeout_frames, 0):]
+                        last_voice_frame = len(recording_frames)
+                else:
+                    # We're recording
+                    recording_frames.append(input_data)
+                    if(voice_detected):
+                        last_voice_frame = len(recording_frames)
+                    if(last_voice_frame < (len(recording_frames) - _timeout_frames*2)):
+                        # We have waited past the timeout number of frames
+                        # so we believe the speaker has finished speaking.
+                        if(len(recording_frames) > _minimum_capture):
+                            println(
+                                "Recorded {:.2f} seconds".format(
+                                    len(recording_frames) * period_length
+                                ),
+                                self.displaywidth,
+                                scroll=True
+                            )
+                            # put the audio in a queue and call the stt engine
+                            self.recordings_queue.appendleft(recording_frames)
+                            if not (stt_thread and hasattr(stt_thread, "is_alive") and stt_thread.is_alive()):
+                                # start the thread
+                                stt_thread = threading.Thread(
+                                    target=self.stt
+                                )
+                                stt_thread.start()
+                        frames.clear()
+                        recording = False
+                        recording_frames = []
+                        last_voice_frame = 0
+        except KeyboardInterrupt:
+            println("Exiting...", self.displaywidth)
+        finally:
+            # Close the stream
+            audio_processor.close_stream()
+
 
 if __name__ == "__main__":
-    main()
+    Main().main()
