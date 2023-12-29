@@ -1,5 +1,4 @@
-numpy
-sounddevice
-soundfile
+blessings
+pyaudio # requires the libasound2-dev apt package in Debian
+pyalsaaudio # requires the portaudio19-dev apt package in Debian
 vosk
-webrtcvad
