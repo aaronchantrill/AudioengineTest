@@ -3,8 +3,12 @@ cryptography
 jiwer
 mad
 python-slugify
+blessings
 
 # audioengines/pyaudio-ae
 pyaudio
 # audioengines/alsa-ae
 pyalsaaudio
+
+# STT engine VOSK
+vosk
