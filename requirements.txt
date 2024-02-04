@@ -2,7 +2,10 @@
 cryptography
 jiwer
 mad
+python-dateutil
 python-slugify
+pytz
+PyYAML
 blessings
 
 # audioengines/pyaudio-ae
@@ -12,3 +15,6 @@ pyalsaaudio
 
 # STT engine VOSK
 vosk
+
+# webrtcvad
+webrtcvad
