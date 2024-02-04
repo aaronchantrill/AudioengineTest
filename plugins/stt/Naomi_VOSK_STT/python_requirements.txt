@@ -1,0 +1,2 @@
+# VOSK STT
+vosk

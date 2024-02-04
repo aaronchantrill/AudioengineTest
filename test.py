@@ -319,6 +319,7 @@ class Main:
         self.input_channels = 1
         self.input_bits = 16
         self.input_samplerate = 16000
+        self.Continue = True
         try:
             self.displaywidth = Terminal().width
         except TypeError:
@@ -355,6 +356,8 @@ class Main:
                 transcription = res['text'].strip()
                 if len(transcription) > 0:
                     println(f"<< {transcription} {len(self.recordings_queue)}", self.displaywidth, scroll=True)
+                else:
+                    println(f"<< <noise> {len(self.recordings_queue)}", self.displaywidth, scroll=True)
                 if any(map(lambda v: v in transcription, ["shut down", "shutdown", "turn off", "quit"])):
                     self.say("okay, quitting")
                     self.Continue = False
@@ -365,9 +368,12 @@ class Main:
             except IndexError:
                 break
 
+    def say(self, phrase):
+        println(f">> {phrase}", self.displaywidth, scroll=True)
+
     def main(self):
         if pyaudio is None and alsaaudio is None:
-            print("Error: Both pyaudio and pyalsaaudio libraries are not installed.")
+            print("Error: Neither pyaudio nor pyalsaaudio libraries are installed.")
             sys.exit(1)
 
         available_libraries = []
@@ -378,7 +384,10 @@ class Main:
 
         print("Available audio libraries:", available_libraries)
 
-        library_choice = input("Choose an audio library ({}): ".format("/".join(available_libraries)))
+        if(len(available_libraries)>1):
+            library_choice = input("Choose an audio library ({}): ".format("/".join(available_libraries)))
+        else:
+            library_choice = available_libraries[0]
 
         if library_choice not in available_libraries:
             print("Invalid choice. Exiting.")
@@ -420,7 +429,7 @@ class Main:
         recording_frames = []
         audio_processor.open_stream()
         try:
-            while True:
+            while self.Continue:
                 input_data = audio_processor.record()
                 voice_detected = VAD._voice_detected(
                     input_data,
@@ -470,10 +479,13 @@ class Main:
                         recording_frames = []
                         last_voice_frame = 0
         except KeyboardInterrupt:
-            println("Exiting...", self.displaywidth)
+            println("", self.displaywidth)
+            println("Keyboard Interrupt Detected. Exiting...", self.displaywidth, scroll=True)
         finally:
             # Close the stream
             audio_processor.close_stream()
+        # Clear the current display line
+        println("", self.displaywidth)
 
 
 if __name__ == "__main__":
