@@ -246,7 +246,7 @@ class Assistant:
                 if not (stt_thread and hasattr(stt_thread, "is_alive") and stt_thread.is_alive()):
                     # start the thread
                     stt_thread = threading.Thread(
-                        target=self.mic.listen
+                        target=self.mic.handle_vad_output
                     )
                     stt_thread.start()
         except KeyboardInterrupt:

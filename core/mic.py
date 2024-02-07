@@ -3,6 +3,7 @@ import contextlib
 import tempfile
 import threading
 import wave
+from core import profile
 from core import visualizations
 from datetime import datetime
 
@@ -48,11 +49,17 @@ class Mic:
             yield f
 
     def listen(self):
+        transcription = ""
+        audio = self.recordings_queue.pop()
+        if len(audio)>0:
+            with self._write_frames_to_file(audio, None) as f:
+                transcription = self.active_stt_plugin.transcribe(f)[0]
+        return transcription
+
+    def handle_vad_output(self):
         while True:
             try:
-                audio = self.recordings_queue.pop()
-                with self._write_frames_to_file(audio, None) as f:
-                    transcription = self.active_stt_plugin.transcribe(f)[0]
+                transcription = self.listen()
                 if len(transcription) > 0:
                     visualizations.run_visualization(
                         "output",
@@ -65,6 +72,7 @@ class Mic:
                     )
                 if any(map(lambda v: v in transcription, ["shut down", "shutdown", "turn off", "quit"])):
                     self.say("okay, quitting")
+                    profile.set_arg('resetmic', True)
                     self.Continue = False
                 if transcription.startswith("say "):
                     # start a speak thread

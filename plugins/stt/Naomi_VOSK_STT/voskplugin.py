@@ -122,7 +122,7 @@ class VoskSTTPlugin(plugin.STTPlugin):
         data = fp.read()
 
         if(len(data) == 0):
-            self._logger.warn(f"File {wave_file} is empty")
+            self._logger.warn(f"Audio file is empty")
             return ""
         self.rec.AcceptWaveform(data)
         res = json.loads(self.rec.Result())
